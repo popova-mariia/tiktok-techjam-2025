@@ -1,0 +1,37 @@
+# Core Python utilities
+numpy
+pandas
+matplotlib
+seaborn
+scikit-learn
+
+# NLP & ML frameworks
+tensorflow
+torch
+torchvision
+torchaudio
+transformers
+datasets
+sentencepiece
+nltk
+spacy
+gensim
+
+# Model serving & experimentation
+huggingface_hub
+accelerate
+
+# Data cleaning & preprocessing
+beautifulsoup4
+regex
+
+# Visualization / reporting
+plotly
+
+# Optional: scraping tools (if you plan to crawl reviews yourself)
+requests
+scrapy
+
+# Jupyter / development
+jupyter
+notebook
