@@ -20,7 +20,7 @@ This project aims to **filter noisy reviews** and enforce review-quality policie
   - `policy.py`
   - `preprocess.py`
 - `data/`   
-  - `raw/`          # raw input CSVs (ignored in git)
+  - `data/`          # raw input CSVs (ignored in git)
   - `processed/`    # preprocessed parquet + sample CSVs
 - `README.md`
 - `requirements.txt`
