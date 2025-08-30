@@ -13,9 +13,9 @@ torchaudio
 transformers
 datasets
 sentencepiece
+scikit-learn
 nltk
 spacy
-gensim
 
 # Model serving & experimentation
 huggingface_hub
