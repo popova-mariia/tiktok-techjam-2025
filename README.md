@@ -18,54 +18,6 @@ This addresses **Prompt 1: Filtering the Noise – ML for Trustworthy Location R
 
 ---
 
-## Repository Structure
-
-// to be updated
-
-- `scripts/`
-  - `features.py`
-  - `model.py`
-  - `policy.py`
-  - `preprocess.py`
-- `data/`   
-  - `data/`          # raw input CSVs (ignored in git)
-  - `processed/`    # preprocessed parquet + sample CSVs
-- `README.md`
-- `requirements.txt`
-- `.gitignore`
-
----
-
-## Preprocessing Script
-
-### Features Extracted
-The preprocessing step (`scripts/preprocess.py`) does the following:
-
-- **HTML & URL cleaning**
-  - Strips HTML tags
-  - Removes URLs (flags if a URL was present)
-- **Normalization**
-  - Lowercasing
-  - Whitespace collapsing
-- **Signals & Features**
-  - Review length (characters, tokens)
-  - Count of exclamation marks, question marks
-  - Count of ALLCAPS tokens
-  - Boolean flag for very short reviews
-- **Metadata**
-  - Business name, author name
-  - Rating (clipped to 1–5)
-  - Category ID (mapped from raw rating category)
-  - Has photo flag
-  - Deterministic review ID (hash)
-- **Deduplication**
-  - Drops rows with empty text
-  - Drops duplicates by `(business_name, author_name, text_clean)`
-- **Outputs**
-  - Saves `.parquet` file
-  - Optional labelmap JSON (`category_id ↔ category_name`)
-  - Sample `.csv` of first 2000 rows for inspection
-
 ### Usage
 
 ```bash
