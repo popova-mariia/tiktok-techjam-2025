@@ -5,8 +5,16 @@ This repository contains code and resources for our hackathon project on **asses
 ---
 
 ## Project Overview
-Online reviews often contain spam, advertisements, irrelevant content, or unhelpful rants.  
-This project aims to **filter noisy reviews** and enforce review-quality policies (no ads, no irrelevant content, no fake rants) by building a preprocessing pipeline and ML models for classification.
+Online reviews often contain **spam, advertisements, irrelevant content, or unhelpful rants**.  
+
+Our project tackles this by:  
+- **Filtering noisy reviews** with heuristic rules (ads, irrelevant topics, no-visit rants, low-quality).  
+- **Building preprocessing pipelines** for CSV data.  
+- **Extracting features** (linguistic, behavioral, and semantic).  
+- **Training ML models** (scikit-learn + Transformers) to classify reviews as valid or invalid.  
+- **Evaluating against policies** to enforce trustworthy review standards.  
+
+This addresses **Prompt 1: Filtering the Noise – ML for Trustworthy Location Reviews**.
 
 ---
 
