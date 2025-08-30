@@ -1,2 +1,2 @@
-n_reviews,n_businesses,has_url_pct,short_pct,avg_tokens,avg_exclaim,avg_caps_tokens
-1100,100,0.0,22.73,20.05,0.085,0.045
+n_reviews,n_businesses,has_url_pct,avg_num_urls,had_html_pct,has_email_pct,has_phone_pct,coupon_word_pct,short_pct,avg_tokens,avg_exclaim,avg_caps_tokens,rating_only_pct,exact_dupe_rows,looks_promo_heur_pct,looks_rant_no_visit_heur_pct,looks_irrelevant_heur_pct
+1100,100,0.0,0.0,0.36,0.0,0.0,0.18,22.73,20.05,0.085,0.045,0.0,0,0.18,0.0,0.09
