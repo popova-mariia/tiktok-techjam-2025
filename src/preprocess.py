@@ -126,6 +126,7 @@ def main():
     out["looks_promo_heur"]        = (out["has_url"] | out["has_email"] | out["has_phone"] | out["contains_coupon"]).astype("boolean")
     out["looks_rant_no_visit_heur"]= tr.str.contains(NO_VISIT_RE).fillna(False).astype("boolean")
     out["looks_irrelevant_heur"]   = (tr.str.contains(DEVICE_RE) | tr.str.contains(POLITICS_RE)).fillna(False).astype("boolean")
+    out["looks_low_quality_heur"] = (out["is_short"] | out["is_rating_only"] | out["is_empty_text_clean"]).astype("boolean")
 
     # ids
     out["timestamp"] = pd.NaT  # placeholder, parse if you add a date column later
@@ -170,7 +171,7 @@ def main():
     cols_to_show = ["business_name","author_name","rating","category_raw",
                     "has_url","has_email","has_phone","contains_coupon",
                     "is_empty_text_clean","is_rating_only","is_exact_dupe",
-                    "looks_promo_heur","looks_rant_no_visit_heur","looks_irrelevant_heur",
+                    "looks_promo_heur","looks_rant_no_visit_heur","looks_irrelevant_heur", "looks_low_quality_heur",
                     "text_clean"]
     print("Preview:")
     print(out[cols_to_show].sample(min(5, len(out))).to_string(index=False))
