@@ -3,8 +3,6 @@
 import argparse
 import json
 from pathlib import Path
-from features import assign_label, prompt_classify
-
 
 import joblib
 import numpy as np
