@@ -1,5 +1,6 @@
 import pandas as pd
 from transformers import AutoTokenizer, pipeline
+import re
 
 def assign_label(row):
     if row["looks_promo_heur"]:
@@ -9,28 +10,51 @@ def assign_label(row):
     else:
         return None
 
-PROMPT_TEMPLATE = """Classify the following review into exactly one of these categories:
+
+PROMPT_TEMPLATE = """Classify the following review into exactly ONE of these labels:
+- Advertisement
 - Irrelevant
 - Rant_No_Visit
 - Valid
 
-Review: "{text}"
+Reply with just the label on a single line. No extra words.
+
+Review:
+{text}
 Answer:"""
 
 classifier = pipeline("text-generation", model="Qwen/Qwen2.5-0.5B-Instruct")
 
 def prompt_classify(text):
     if not isinstance(text, str) or text.strip() == "":
-        return "Low_Quality"
+        return "Valid"  # safe fallback
 
-    prompt = PROMPT_TEMPLATE.format(text=text)
-    result = classifier(prompt, max_new_tokens=10)[0]["generated_text"]
+    prompt = PROMPT_TEMPLATE.format(text=text.strip())
+    out = classifier(
+        prompt,
+        max_new_tokens=8,
+        return_full_text=False  # <<< KEY: don't echo the prompt
+    )[0]["generated_text"].strip()
 
-    # naive cleanup: pick the first matching label
-    for label in ["Irrelevant", "Rant_No_Visit", "Valid"]:
-        if label in result:
-            return label
-    return "Valid"  # fallback
+    # take only the first non-empty line
+    first = out.splitlines()[0].strip()
+
+    # normalize variants like "rant no visit", "Rant-No-Visit"
+    norm = re.sub(r"[\s\-]+", "_", first.lower())
+
+    mapping = {
+        "advertisement": "Advertisement",
+        "ad": "Advertisement",
+        "ads": "Advertisement",
+        "irrelevant": "Irrelevant",
+        "rant_no_visit": "Rant_No_Visit",
+        "valid": "Valid",
+    }
+    for k, v in mapping.items():
+        if k == norm or k in norm:
+            return v
+    return "Valid"
+
 
 def build_features(parquet_path, model_name="distilbert-base-uncased", max_len=128):
     # load file with cleaned reviews
