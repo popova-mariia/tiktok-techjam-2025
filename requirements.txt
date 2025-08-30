@@ -4,6 +4,7 @@ pandas
 matplotlib
 seaborn
 scikit-learn
+imblearn
 
 # NLP & ML frameworks
 tensorflow

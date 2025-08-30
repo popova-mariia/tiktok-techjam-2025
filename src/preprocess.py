@@ -117,6 +117,32 @@ def main():
     out["num_caps_tokens"]= tr.apply(lambda s: len(ALLCAP_TOKEN_RE.findall(s))).astype(int)
     out["is_short"]       = (out["length_tokens"] <= 10)
 
+     # --- extra derived numeric features ---
+    out["avg_token_len"] = (
+        out["length_chars"] / out["length_tokens"].clip(lower=1)
+    ).astype(float)
+
+    out["ratio_exclaim"] = (
+        out["num_exclaim"] / out["length_tokens"].clip(lower=1)
+    ).astype(float)
+    out["ratio_question"] = (
+        out["num_question"] / out["length_tokens"].clip(lower=1)
+    ).astype(float)
+
+    out["caps_ratio"] = (
+        out["num_caps_tokens"] / out["length_tokens"].clip(lower=1)
+    ).astype(float)
+
+    out["unique_token_ratio"] = out["text_clean"].apply(
+        lambda s: len(set(str(s).split())) if isinstance(s, str) else 0
+    ) / out["length_tokens"].clip(lower=1)
+
+    POS_RE = re.compile(r"\b(good|great|delicious|amazing|fantastic|love|wonderful|best)\b", re.I)
+    NEG_RE = re.compile(r"\b(bad|terrible|horrible|worst|awful|hate|disgusting|poor)\b", re.I)
+
+    out["num_pos_words"] = out["text_clean"].str.count(POS_RE).fillna(0).astype(int)
+    out["num_neg_words"] = out["text_clean"].str.count(NEG_RE).fillna(0).astype(int)
+
     # initial flags (key change)
     out["is_empty_text_raw"]   = out["text_raw"].isna() | (out["text_raw"].astype(str).str.strip() == "")
     out["is_empty_text_clean"] = out["text_clean"].astype(str).str.len() == 0
@@ -170,11 +196,14 @@ def main():
     print(f"Saved: {outp} rows={len(out)} uniques_business={out['business_name'].nunique()}")
     cols_to_show = ["business_name","author_name","rating","category_raw",
                     "has_url","has_email","has_phone","contains_coupon",
+                    "length_tokens","avg_token_len","caps_ratio","unique_token_ratio",
+                    "num_pos_words","num_neg_words",
                     "is_empty_text_clean","is_rating_only","is_exact_dupe",
-                    "looks_promo_heur","looks_rant_no_visit_heur","looks_irrelevant_heur", "looks_low_quality_heur",
+                    "looks_promo_heur","looks_rant_no_visit_heur","looks_irrelevant_heur","looks_low_quality_heur",
                     "text_clean"]
     print("Preview:")
     print(out[cols_to_show].sample(min(5, len(out))).to_string(index=False))
+
 
 if __name__ == "__main__":
     main()
