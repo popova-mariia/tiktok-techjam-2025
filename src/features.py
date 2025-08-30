@@ -39,7 +39,7 @@ def build_features(parquet_path, model_name="distilbert-base-uncased", max_len=1
     # assign labels to each review
     df["label"] = df.apply(assign_label, axis=1)
 
-    # fill in ambiguous cases with LLM prompt
+    # fill in ambiguous cases with LLM prompt - if heuristics cannot classify, pass to LLM
     mask = df["label"].isna()
     if mask.any():
         df.loc[mask, "label"] = df.loc[mask, "text_clean"].apply(prompt_classify)
