@@ -17,7 +17,7 @@ PROMPT_TEMPLATE = """Classify the following review into exactly one of these cat
 Review: "{text}"
 Answer:"""
 
-classifier = pipeline("text-generation", model="Qwen/Qwen2-7B-Instruct")
+classifier = pipeline("text-generation", model="Qwen/Qwen2.5-0.5B-Instruct")
 
 def prompt_classify(text):
     if not isinstance(text, str) or text.strip() == "":
