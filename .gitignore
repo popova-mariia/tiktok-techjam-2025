@@ -1,4 +1,4 @@
-data/
+data/processed/*
 
 # Python cache / build
 __pycache__/
