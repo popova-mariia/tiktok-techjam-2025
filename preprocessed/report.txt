@@ -1,6 +1,0 @@
-# Rows: 1239
-flag_ad_promo: 1 (0.001)
-flag_offtopic: 22 (0.018)
-flag_rant_no_visit: 4 (0.003)
-Deduped rows: 1239 unique by business+text_norm
-len_words (p50/p90/p99): 18/35/58
