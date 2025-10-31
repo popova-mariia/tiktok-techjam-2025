@@ -1,5 +1,6 @@
-# data/processed/*
-# data/data/*
+# Data folders (exclude all)
+data/
+preprocessed/   
 
 # Python cache / build
 __pycache__/
