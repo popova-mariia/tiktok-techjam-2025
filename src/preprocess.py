@@ -1,209 +1,353 @@
-# src/preprocess.py
-import argparse, re, sys, json, warnings
-from pathlib import Path
+#!/usr/bin/env python3
+# preprocess.py
+#
+# Usage:
+#   python src/preprocess.py --in data/translated_reviews.csv --outdir preprocessed --valid_frac 0.2
+#
+# Input columns expected:
+#   business_name | author_name | text
+#
+# Outputs:
+#   preprocessed/reviews.parquet       (full cleaned dataset + features)
+#   preprocessed/train.parquet         (train split)
+#   preprocessed/valid.parquet         (validation split)
+#   preprocessed/report.txt            (quick distribution report)
+#
+# Notes:
+# - No heavy deps. Install: pandas, numpy, regex (pip install pandas numpy regex)
+# - You can extend weak-label heuristics as you iterate.
+
+import argparse, os, re, math, json
+import unicodedata
+import numpy as np
 import pandas as pd
-from bs4 import BeautifulSoup, MarkupResemblesLocatorWarning
+import regex as rx
 
-warnings.filterwarnings("ignore", category=MarkupResemblesLocatorWarning)
+# ---------------------------------------------------------------------
+# REGEXES
+# ---------------------------------------------------------------------
+URL_RE   = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
+EMAIL_RE = re.compile(r"\b[\w\.-]+@[\w\.-]+\.\w+\b")
+PHONE_RE = re.compile(r"(\+?\d[\d\-\s]{6,}\d)")
+CODE_RE  = re.compile(r"`[^`]+`|``[^`]+``")
+WS_RE    = re.compile(r"\s+")
+REPEAT_RE = re.compile(r"(.)\1{4,}")  # e.g. loooool, !!!!!!
+NONPRINT = ''.join(c for c in map(chr, range(256)) if unicodedata.category(c) in ('Cc', 'Cf'))
+NONPRINT_TABLE = str.maketrans('', '', NONPRINT)
 
-# ---------- regex helpers ----------
-URL_RE    = re.compile(r"(?i)\b((?:https?://|www\.)\S+)")
-WS_RE     = re.compile(r"\s+")
-EXCL_RE   = re.compile(r"!")
-Q_RE      = re.compile(r"\?")
-ALLCAP_TOKEN_RE = re.compile(r"\b[A-ZÄÖÜİĞŞÇ]{2,}\b")
+PROMO_KEYWORDS = [
+    "dm me", "contact me", "call now", "subscribe", "follow me"
+]
+PROMO_RE = re.compile(r"|".join(map(re.escape, PROMO_KEYWORDS)), re.IGNORECASE)
 
-EMAIL_RE  = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
-PHONE_RE  = re.compile(r"(?:(?:\+?\d{1,3}[\s\-\.]?)?(?:\(?\d{2,4}\)?[\s\-\.]?)?\d{3}[\s\-\.]?\d{4})")
-COUPON_RE = re.compile(r"(?i)\b(discount|promo|coupon|code|deal|% ?off|sale|offer|dm|whatsapp)\b")
-NO_VISIT_RE = re.compile(r"(?i)\b(never been|haven'?t visited|didn'?t go|have not been|i didn'?t visit|i have not visited)\b")
-DEVICE_RE   = re.compile(r"(?i)\b(iphone|android|laptop|macbook|pc|gpu|camera)\b")
-POLITICS_RE = re.compile(r"(?i)\b(election|president|government|policy|war|party)\b")
+REPEAT_LETTERS_RE = re.compile(r"(.)\1{2,}", re.IGNORECASE)
 
-def strip_html(text: str) -> tuple[str, bool]:
-    """Return (plain_text, had_html_flag)."""
-    if not isinstance(text, str): return "", False
-    had_html = ("<" in text and ">" in text) or "&" in text
-    clean = BeautifulSoup(text, "html.parser").get_text(" ", strip=True)
-    return clean, had_html
+def collapse_repeats(text: str) -> str:
+    """turn 'Awesomeee' -> 'Awesome', 'Deliciousss' -> 'Delicious'"""
+    if not isinstance(text, str):
+        return ""
+    # replace 3+ of the same char with just 1
+    return REPEAT_LETTERS_RE.sub(r"\1", text)
 
-def remove_urls(text: str) -> tuple[str, bool, int]:
-    if not isinstance(text, str): return "", False, 0
-    urls = URL_RE.findall(text)
-    no_url = URL_RE.sub("", text)
-    return no_url, bool(urls), len(urls)
 
-def normalize(text: str) -> str:
-    text = (text or "").lower()
-    return WS_RE.sub(" ", text).strip()
+def basic_clean(text: str) -> str:
+    if not isinstance(text, str):
+        return ""
+    t = text.replace("\u200b", " ")  # zero-width space
+    t = t.translate(NONPRINT_TABLE)  # remove control/non-printing
+    t = unicodedata.normalize("NFKC", t)
+    t = t.strip()
+    t = CODE_RE.sub(" ", t)          # strip code blocks/backticks
+    t = WS_RE.sub(" ", t)
+    return t
 
-def load_csv(path: Path) -> pd.DataFrame:
-    try:
-        return pd.read_csv(path)
-    except UnicodeDecodeError:
-        return pd.read_csv(path, encoding="latin-1")
+def normalize_for_dupes(text: str) -> str:
+    t = basic_clean(text).lower()
+    t = URL_RE.sub(" ", t)
+    t = EMAIL_RE.sub(" ", t)
+    t = PHONE_RE.sub(" ", t)
+    t = WS_RE.sub(" ", t)
+    return t
+
+def text_features(s: pd.Series) -> pd.DataFrame:
+    # vectorized feature extraction
+    text = s.fillna("")
+    lens = text.str.len()
+    n_words = text.str.split().str.len().fillna(0)
+
+    urls = text.str.count(URL_RE)
+    emails = text.str.count(EMAIL_RE)
+    phones = text.str.count(PHONE_RE)
+
+    exclam = text.str.count(r"!")
+    ques   = text.str.count(r"\?")
+    caps   = text.apply(lambda x: sum(1 for c in x if c.isupper()))
+    letters = text.apply(lambda x: sum(1 for c in x if c.isalpha()))
+
+    caps_ratio = (caps / (letters.replace(0, np.nan))).fillna(0.0)
+    punct_total = exclam + ques
+    punct_ratio = (punct_total / (lens.replace(0, np.nan))).fillna(0.0)
+
+    repeats = text.str.count(REPEAT_RE)
+
+    return pd.DataFrame({
+        "len_chars": lens,
+        "len_words": n_words,
+        "num_urls": urls,
+        "num_emails": emails,
+        "num_phones": phones,
+        "num_exclaim": exclam,
+        "num_question": ques,
+        "caps_ratio": caps_ratio,
+        "punct_ratio": punct_ratio,
+        "num_repeats": repeats,
+    })
+
+
+def weak_policy_flags(df: pd.DataFrame) -> pd.DataFrame:
+    txt = df["text_clean"].fillna("")
+    # normalized for matching (handles Awesomeee, Deliciousss)
+    txt_norm = txt.apply(collapse_repeats)
+
+    # ------------------------------------------------------------
+    # 0) very common opinion / review stubs (SHORT BUT VALID)
+    # ------------------------------------------------------------
+    # add simple -ly support for common sentiment words
+    SHORT_OPINION_RE = re.compile(
+        r"\b("
+        # base adjectives
+        r"nice|good|great|excellent|amazing|awesome|perfect|cool|beautiful|"
+        r"delicious|tasty|yummy|fresh|classic|"
+        r"recommend(ed|s)?|i recommend|we recommend|"
+        r"like(d)|love(d)?|"
+        r"ok|okay|it's ok|it's okay|its ok|not bad"
+        r"the best|best\b|best in town|best place|best pub|"
+        r"nothing interesting|"
+        r"smiling employees?|friendly staff|"
+         r"magnificent|wonderful|lovely|"
+        r"thank you|thanks|grateful"
+        r")"
+        r"(ly)?"
+        r"\b",
+        re.IGNORECASE,
+    )
+
+    # if it's short AND matches an opinion → treat as reviewy
+    short_valid = (
+        (df["len_words"] <= 8)
+        & txt_norm.str.contains(SHORT_OPINION_RE)
+    )
+
+    # ------------------------------------------------------------
+    # price / value talk — often short but still reviews
+    # ------------------------------------------------------------
+    PRICE_RE = re.compile(
+        r"("
+        r"(cheap|affordable|budget|inexpensive)( place)?"
+        r"|very cheap"
+        r"|so cheap"
+        r"|good price[s]?"
+        r"|fair price[s]?"
+        r"|(a bit|abit|kinda|quite|too)\s+(expensive|pricey)"
+        r"|expensive place"
+        r"|too expensive"
+        r"|overpriced"
+        r")",
+        re.IGNORECASE,
+    )
+    price_valid = txt_norm.str.contains(PRICE_RE)
+
+    # ------------------------------------------------------------
+    # 1) ads / promos
+    # ------------------------------------------------------------
+    is_ad = (
+        txt.str.contains(PROMO_RE)
+        | (df["num_urls"] > 0)
+        | (df["num_emails"] > 0)
+        | (df["num_phones"] > 0)
+    )
+
+    # ------------------------------------------------------------
+    # 2) review-ish gates (WHITELIST)
+    # ------------------------------------------------------------
+    VISIT_RE = re.compile(
+        r"\b(i|we)\s+(went|visited|were there|came here|ordered|stayed|had (breakfast|lunch|dinner))\b",
+        re.IGNORECASE,
+    )
+    REVIEWISH_RE = re.compile(
+        r"\b("
+        r"service|staff|employees?|food|menu|price|prices|"
+        r"cheap|affordable|expensive|pricey|value|portion|"
+        r"clean|location|ambiance|restaurant|cafe|hotel|room|delivery|order"
+        r")\b",
+        re.IGNORECASE,
+    )
+    OPINION_RE = re.compile(
+        r"\b("
+        r"good|great|excellent|amazing|awesome|nice|cool|"
+        r"delicious(ly)?|tasty|"
+        r"bad|terrible|awful|rude|slow|"
+        r"overpriced|worth|recommended?"
+        r")\b",
+        re.IGNORECASE,
+    )
+
+    visit_like = txt_norm.str.contains(VISIT_RE)
+    has_reviewish = txt_norm.str.contains(REVIEWISH_RE)
+    has_opinion = txt_norm.str.contains(OPINION_RE)
+
+    # final reviewy gate
+    is_reviewy = short_valid | price_valid | visit_like | has_reviewish | has_opinion
+
+    # ------------------------------------------------------------
+    # 3) off-topic candidates (only if NOT reviewy)
+    # ------------------------------------------------------------
+    OFFTOPIC_RE = re.compile(
+        r"\b(phone|iphone|samsung|laptop|crypto|bitcoin|nft|politics|election|stock market)\b",
+        re.IGNORECASE,
+    )
+    generic_offtopic = txt_norm.str.contains(OFFTOPIC_RE)
+
+    very_short = df["len_words"] <= 4
+    short_chatter = very_short & (~is_reviewy)
+
+    SLOGAN_RE = re.compile(
+        r"(free palest|free ukraine|stand with|boycott|ceasefire now|black lives matter|blm\b)",
+        re.IGNORECASE,
+    )
+    has_slogan = txt_norm.str.contains(SLOGAN_RE)
+
+    mostly_links = (df["num_urls"] >= 2) & (df["len_words"] <= 10)
+    noisy = (df["num_repeats"] >= 2)
+
+    is_offtopic = (~is_reviewy) & ((df["len_words"] < 3) | (df["len_chars"] < 8)) | generic_offtopic | short_chatter | has_slogan | mostly_links | noisy
+
+    # ------------------------------------------------------------
+    # 4) rant no visit
+    # ------------------------------------------------------------
+    NO_VISIT_RE = re.compile(r"(never been|haven't been|didn't go|not visited)", re.IGNORECASE)
+    is_rant_no_visit = txt_norm.str.contains(NO_VISIT_RE)
+
+    # ------------------------------------------------------------
+    # 5) invalid / junk
+    # ------------------------------------------------------------
+
+    return pd.DataFrame({
+        "flag_ad_promo": is_ad.astype(int),
+        "flag_offtopic": is_offtopic.astype(int),
+        "flag_rant_no_visit": is_rant_no_visit.astype(int),
+    })
+
+
+def compute_sample_weight(row) -> float:
+    # upweight rarer/flagged cases a bit to combat skew
+    w = 1.0
+    # each positive flag increases weight
+    w += 0.5 * row["flag_ad_promo"]
+    # made this gentler since we gated off-topic
+    w += 0.4 * row["flag_offtopic"]
+    w += 0.8 * row["flag_rant_no_visit"]
+    # very short but not flagged? tiny downweight
+    if row["len_words"] < 5 and (row["flag_ad_promo"] + row["flag_offtopic"] + row["flag_rant_no_visit"]) == 0:
+        w *= 0.8
+    return float(w)
+
+def quick_report(df: pd.DataFrame) -> str:
+    lines = []
+    n = len(df)
+    lines.append(f"# Rows: {n}")
+    for c in ["flag_ad_promo", "flag_offtopic", "flag_rant_no_visit"]:
+        if c in df.columns:
+            lines.append(f"{c}: {df[c].sum()} ({df[c].mean():.3f})")
+    lines.append(f"Deduped rows: {df['dedupe_rank'].eq(1).sum()} unique by business+text_norm")
+    # length stats
+    lines.append("len_words (p50/p90/p99): "
+                 f"{df['len_words'].quantile(0.5):.0f}/"
+                 f"{df['len_words'].quantile(0.9):.0f}/"
+                 f"{df['len_words'].quantile(0.99):.0f}")
+    return "\n".join(lines)
+
+def train_valid_split(df: pd.DataFrame, valid_frac: float = 0.2, seed: int = 42):
+    # stratify-ish by a composite flag to keep minority signals in both splits
+    strat = (df["flag_ad_promo"]*4 + df["flag_offtopic"]*2 + df["flag_rant_no_visit"]).clip(0, 7)
+    # group by business to reduce leakage (optional)
+    rng = np.random.default_rng(seed)
+    businesses = df["business_name"].fillna("_NA_").unique()
+    rng.shuffle(businesses)
+    cut = int(len(businesses) * (1 - valid_frac))
+    train_biz = set(businesses[:cut])
+    valid_biz = set(businesses[cut:])
+
+    train = df[df["business_name"].fillna("_NA_").isin(train_biz)].copy()
+    valid = df[df["business_name"].fillna("_NA_").isin(valid_biz)].copy()
+
+    # if extremely unbalanced after split, just fallback to random split
+    if min(len(train), len(valid)) < 50:
+        msk = rng.random(len(df)) < (1 - valid_frac)
+        train, valid = df[msk].copy(), df[~msk].copy()
+
+    return train, valid
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--input", type=str, required=True, help="Input CSV path")
-    ap.add_argument("--output", type=str, required=True, help="Output parquet path")
-    ap.add_argument("--labelmap_out", type=str, default="", help="Optional JSON path to save category_id↔name map")
-    # new flags: keep vs drop behaviours
-    ap.add_argument("--drop_empty_clean", action="store_true", help="If set, drop rows where text_clean is empty")
-    ap.add_argument("--drop_dup_exact", action="store_true", help="If set, drop exact duplicates (biz, author, text_clean)")
-    ap.add_argument("--verbose_preview", action="store_true", help="If set, preview will include extra debug columns")
-
+    ap.add_argument("--in", dest="inp", required=True, help="Input CSV file (raw reviews)")
+    ap.add_argument("--outdir", default="preprocessed", help="Output directory")
+    ap.add_argument("--valid_frac", type=float, default=0.2, help="Validation fraction")
     args = ap.parse_args()
 
-    inp = Path(args.input)
-    outp = Path(args.output)
-    outp.parent.mkdir(parents=True, exist_ok=True)
+    os.makedirs(args.outdir, exist_ok=True)
 
-    df = load_csv(inp)
-
-    required = ["business_name", "author_name", "text", "photo", "rating", "rating_category"]
-    missing = [c for c in required if c not in df.columns]
+    # 1) load
+    df = pd.read_csv(args.inp)
+    expected = {"business_name", "author_name", "text"}
+    missing = expected - set(df.columns)
     if missing:
-        print("Missing required columns:", missing, file=sys.stderr)
-        print("Available columns:", list(df.columns), file=sys.stderr)
-        sys.exit(1)
+        raise ValueError(f"Missing columns: {missing}")
 
-    # base frame
-    out = pd.DataFrame()
-    out["business_name"] = df["business_name"].astype(str)
-    out["author_name"]   = df["author_name"].astype(str)
-    out["photo_path"]    = df["photo"].astype(str)
-    out["has_photo"]     = out["photo_path"].str.len().fillna(0).astype(int).gt(0)
+    # 2) drop obvious junk rows
+    df = df.dropna(subset=["text"]).copy()
+    df["text_clean"] = df["text"].apply(basic_clean)
+    df = df[df["text_clean"].str.strip().ne("")].copy()
 
-    # rating: coerce to numeric and clip to [1,5]
-    rating_num = pd.to_numeric(df["rating"], errors="coerce")
-    out["rating"] = rating_num.clip(lower=1, upper=5)
+    # 3) near-duplicate removal (same business + same normalized text)
+    df["text_norm"] = df["text_clean"].apply(normalize_for_dupes)
+    df["dupe_key"] = df["business_name"].astype(str).str.strip().str.lower() + "||" + df["text_norm"]
+    df["dedupe_rank"] = df.groupby("dupe_key")["dupe_key"].rank(method="first")
+    df = df[df["dedupe_rank"] == 1].copy()
 
-    # class label
-    out["category_raw"] = df["rating_category"].astype(str)
-    cat = pd.Categorical(out["category_raw"])
-    out["category_id"] = pd.Series(cat.codes, dtype="int16")  # -1 if NaN, but we cast after fillna below
+    # 4) features
+    feats = text_features(df["text_clean"])
+    df = pd.concat([df.reset_index(drop=True), feats.reset_index(drop=True)], axis=1)
 
-    # text cleaning
-    raw = df["text"]
-    out["text_raw"] = raw
+    # 5) weak labels / policy flags (UPDATED)
+    flags = weak_policy_flags(df)
+    df = pd.concat([df.reset_index(drop=True), flags.reset_index(drop=True)], axis=1)
 
-    # strip HTML (but keep content intact)
-    stripped_pairs = raw.apply(strip_html)  # -> (stripped, had_html)
-    stripped_text  = [p[0] for p in stripped_pairs]
-    had_html_flags = [p[1] for p in stripped_pairs]
+    # 6) sample weights
+    df["sample_weight"] = df.apply(compute_sample_weight, axis=1)
 
-    # URL detection only (don’t remove from text)
-    has_url_flag = [bool(URL_RE.search(t)) if isinstance(t,str) else False for t in stripped_text]
-    num_urls     = [len(URL_RE.findall(t)) if isinstance(t,str) else 0 for t in stripped_text]
+    # 7) save full dataset
+    full_out = os.path.join(args.outdir, "reviews.parquet")
+    df.to_parquet(full_out, index=False)
 
-    out["text_stripped"] = stripped_text
-    out["had_html"]      = pd.Series(had_html_flags, dtype="boolean")
-    out["text_clean"]    = pd.Series(stripped_text).apply(normalize)   # lowercased + ws-normalized, but URLs preserved
-    out["has_url"]       = pd.Series(has_url_flag, dtype="boolean")
-    out["num_urls"]      = pd.Series(num_urls, dtype="Int16")
+    # 8) split train/valid
+    train, valid = train_valid_split(df, valid_frac=args.valid_frac)
+    train_out = os.path.join(args.outdir, "train.parquet")
+    valid_out = os.path.join(args.outdir, "valid.parquet")
+    train.to_parquet(train_out, index=False)
+    valid.to_parquet(valid_out, index=False)
 
-    # additional raw signals
-    tr = out["text_raw"].fillna("")
-    out["has_email"]      = tr.str.contains(EMAIL_RE).fillna(False).astype("boolean")
-    out["has_phone"]      = tr.str.contains(PHONE_RE).fillna(False).astype("boolean")
-    out["contains_coupon"] = tr.str.contains(COUPON_RE).fillna(False).astype("boolean")
+    # 9) quick report
+    rep = quick_report(df)
+    with open(os.path.join(args.outdir, "report.txt"), "w", encoding="utf-8") as f:
+        f.write(rep + "\n")
 
-    # lengths & counts (use clean or raw as appropriate)
-    out["length_chars"]   = out["text_clean"].str.len().fillna(0).astype(int)
-    out["length_tokens"]  = out["text_clean"].str.split().apply(len).astype(int)
-    out["num_exclaim"]    = tr.apply(lambda s: len(EXCL_RE.findall(s))).astype(int)
-    out["num_question"]   = tr.apply(lambda s: len(Q_RE.findall(s))).astype(int)
-    out["num_caps_tokens"]= tr.apply(lambda s: len(ALLCAP_TOKEN_RE.findall(s))).astype(int)
-    out["is_short"]       = (out["length_tokens"] <= 10)
-
-     # --- extra derived numeric features ---
-    out["avg_token_len"] = (
-        out["length_chars"] / out["length_tokens"].clip(lower=1)
-    ).astype(float)
-
-    out["ratio_exclaim"] = (
-        out["num_exclaim"] / out["length_tokens"].clip(lower=1)
-    ).astype(float)
-    out["ratio_question"] = (
-        out["num_question"] / out["length_tokens"].clip(lower=1)
-    ).astype(float)
-
-    out["caps_ratio"] = (
-        out["num_caps_tokens"] / out["length_tokens"].clip(lower=1)
-    ).astype(float)
-
-    out["unique_token_ratio"] = out["text_clean"].apply(
-        lambda s: len(set(str(s).split())) if isinstance(s, str) else 0
-    ) / out["length_tokens"].clip(lower=1)
-
-    POS_RE = re.compile(r"\b(good|great|delicious|amazing|fantastic|love|wonderful|best)\b", re.I)
-    NEG_RE = re.compile(r"\b(bad|terrible|horrible|worst|awful|hate|disgusting|poor)\b", re.I)
-
-    out["num_pos_words"] = out["text_clean"].str.count(POS_RE).fillna(0).astype(int)
-    out["num_neg_words"] = out["text_clean"].str.count(NEG_RE).fillna(0).astype(int)
-
-    # initial flags (key change)
-    out["is_empty_text_raw"]   = out["text_raw"].isna() | (out["text_raw"].astype(str).str.strip() == "")
-    out["is_empty_text_clean"] = out["text_clean"].astype(str).str.len() == 0
-    out["is_rating_only"]      = out["is_empty_text_clean"] & out["rating"].notna()
-
-    # light heuristics (still not final labels)
-    out["looks_promo_heur"]        = (out["has_url"] | out["has_email"] | out["has_phone"] | out["contains_coupon"]).astype("boolean")
-    out["looks_rant_no_visit_heur"]= tr.str.contains(NO_VISIT_RE).fillna(False).astype("boolean")
-    out["looks_irrelevant_heur"]   = (tr.str.contains(DEVICE_RE) | tr.str.contains(POLITICS_RE)).fillna(False).astype("boolean")
-    out["looks_low_quality_heur"] = (out["is_short"] | out["is_rating_only"] | out["is_empty_text_clean"]).astype("boolean")
-
-    # ids
-    out["timestamp"] = pd.NaT  # placeholder, parse if you add a date column later
-    out["review_id"] = pd.util.hash_pandas_object(
-        out["business_name"].str.cat(out["author_name"], sep="|").str.cat(out["text_clean"], sep="|"),
-        index=False
-    ).astype("int64").astype("string")
-
-    # duplicates: mark instead of blindly dropping
-    key = ["business_name","author_name","text_clean"]
-    grp = out.groupby(key, dropna=False)
-    out["dupe_count"]  = grp["review_id"].transform("size").astype("Int16")
-    out["is_exact_dupe"]= (out["dupe_count"] > 1)
-
-    # optional dropping (controlled by flags)
-    if args.drop_empty_clean:
-        out = out[~out["is_empty_text_clean"]].copy()
-    if args.drop_dup_exact:
-        out = out.drop_duplicates(subset=key, keep="first").copy()
-
-    # tidy dtypes
-    out["category_id"] = out["category_id"].replace({-1: pd.NA}).astype("Int16")
-
-    # save
-    out.to_parquet(outp, index=False)
-
-    # label map
-    if args.labelmap_out:
-        lm_path = Path(args.labelmap_out)
-        lm_path.parent.mkdir(parents=True, exist_ok=True)
-        label_map = {int(i): name for i, name in enumerate(list(cat.categories))}
-        with open(lm_path, "w", encoding="utf-8") as f:
-            json.dump(label_map, f, ensure_ascii=False, indent=2)
-
-    # csv sample
-    sample_csv = outp.with_suffix(".sample.csv")
-    out.head(2000).to_csv(sample_csv, index=False)
-
-    # summary
-    # for now showing all the cols for debugging purposes 
-    print(f"Saved: {outp} rows={len(out)} uniques_business={out['business_name'].nunique()}")
-    cols_to_show = ["business_name","author_name","rating","category_raw",
-                    "has_url","has_email","has_phone","contains_coupon",
-                    "length_tokens","avg_token_len","caps_ratio","unique_token_ratio",
-                    "num_pos_words","num_neg_words",
-                    "is_empty_text_clean","is_rating_only","is_exact_dupe",
-                    "looks_promo_heur","looks_rant_no_visit_heur","looks_irrelevant_heur","looks_low_quality_heur",
-                    "text_clean"]
-    print("Preview:")
-    print(out[cols_to_show].sample(min(5, len(out))).to_string(index=False))
-
+    print("=== Preprocess done ===")
+    print(f"Full:   {full_out}  rows={len(df)}")
+    print(f"Train:  {train_out} rows={len(train)}")
+    print(f"Valid:  {valid_out} rows={len(valid)}")
+    print("---")
+    print(rep)
 
 if __name__ == "__main__":
     main()
